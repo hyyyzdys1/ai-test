@@ -13,6 +13,8 @@ class VectorSizeTest {
   bool default_constructed_size_is_zero() const {
     std::vector<int> values;
     const auto actual = values.size();
+    // AC-3 的失败与恢复验证只修改下面这一行的期望值（0 <-> 1），
+    // 其余构造、取值与比较逻辑保持不变；交付源码保留期望值 0。
     const std::size_t expected = 0;
     return actual == expected;
   }
