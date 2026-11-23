@@ -43,9 +43,14 @@ add_test(NAME tcp_hello_invalid_port_overflow
 add_test(NAME tcp_hello_invalid_port_text
          COMMAND $<TARGET_FILE:tcp_hello_server> not-a-port)
 
+# 通过判据必须同时满足两点：非零退出（WILL_FAIL）且输出中出现预期的端口参数校验错误行。
+# 仅用 WILL_FAIL 时，进程崩溃或因运行库缺失导致的启动失败同样是非零退出，会被误判为通过；
+# 追加 PASS_REGULAR_EXPRESSION 后，失败原因被收敛到 README §7 约定的日志契约。
 set_tests_properties(
     tcp_hello_invalid_port_zero
     tcp_hello_invalid_port_overflow
     tcp_hello_invalid_port_text
-    PROPERTIES WILL_FAIL TRUE
+    PROPERTIES
+    WILL_FAIL TRUE
+    PASS_REGULAR_EXPRESSION "ERROR invalid port argument"
 )
