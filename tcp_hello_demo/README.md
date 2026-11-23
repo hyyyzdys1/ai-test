@@ -57,7 +57,7 @@ python --version
 
 ```
 tcp_hello_demo/
-├── CMakeLists.txt          # MSVC + CMake 构建，链接 ws2_32；含非法端口的 ctest 负面用例
+├── CMakeLists.txt          # MSVC + CMake 构建，链接 ws2_32；含非法端口 ctest 负面用例（包装脚本在配置阶段生成到 build/）
 ├── README.md               # 本文件
 ├── .gitignore              # 排除 build/ 构建产物
 ├── src/
@@ -168,7 +168,7 @@ CONNECTED peer=127.0.0.1:<客户端端口>
 | S2 | AC-2 | 首包 ≤1.2 秒、5 秒内 ≥4 次、每次恰为 5 字节 `Hello`、间隔 ∈[0.8s,1.2s] |
 | S3 | AC-3 | 双客户端并发，各自按秒收到 `Hello` |
 | S4 | AC-4 | 断开一个客户端后 2 秒内 `DISCONNECTED`、不再发送、进程存活、其他连接继续、新连接可用 |
-| S5 | AC-5 | 按 CMake 配置与构建成功无错误，产物运行后输出监听端口 |
+| S5 | AC-5 | 按 CMake 配置与构建成功无错误，产物运行后输出监听端口；3 个非法端口参数均非零退出且输出含 `ERROR invalid port argument`（与 §6.3 的 ctest 负面用例同一判据） |
 | S6 | AC-6 | `CTRL_BREAK_EVENT` 后 5 秒内退出码 0，且以不设 `SO_REUSEADDR` 的新 socket 立即重绑同一端口 |
 | S7 | AC-7 | 端口被占用时输出含 `10048` 的明确错误并非零退出 |
 
@@ -222,16 +222,59 @@ python tcp_hello_demo/tests/test_server.py --server tcp_hello_demo/build/Release
   S1–S7 全量**，不允许只跑子集作为回归结论；调试时可临时用 `--only` 缩小范围，但回归结论以全量为准。
 - 计时断言统一 ±200ms 容差，测试客户端统一连接回环 `127.0.0.1`。
 
-### 6.3 命令行负面用例（ctest，可选）
+### 6.3 命令行负面用例（ctest）
 
-`CMakeLists.txt` 另外注册了 3 个非法端口用例（端口 `0`、`65536`、非数字），可在构建后执行：
+`CMakeLists.txt` 另外注册了 3 个非法端口用例，用于验证 FR-1 的参数校验退出路径：
+
+| ctest 用例名 | 传入参数 |
+|---|---|
+| `tcp_hello_invalid_port_zero` | `0` |
+| `tcp_hello_invalid_port_overflow` | `65536` |
+| `tcp_hello_invalid_port_text` | `not-a-port` |
+
+在构建后执行（构建目录内）：
 
 ```powershell
 cd tcp_hello_demo\build
 ctest -C Release --output-on-failure
 ```
 
-三个用例均以“服务端非零退出”为通过判据。
+**通过判据**：由 `CMakeLists.txt` 在配置阶段生成到构建目录的包装脚本
+`build/check_invalid_port.cmake` 执行服务端并**同时**校验两点：
+
+1. 服务端**非零退出**（本实现约定为 `2`，见 §8；判据本身只要求非零，不把取值写死在测试里）；
+2. stdout/stderr 中出现 README §7 约定的错误行 `ERROR invalid port argument`。
+
+两点缺一即判该用例失败。原因：只看退出码时，进程崩溃或运行库缺失同样是非零退出，
+会被误判为通过；只看输出时，退出码契约不再被校验。
+
+> 注意：**不要**给这类用例使用 `WILL_FAIL TRUE` 与 `PASS_REGULAR_EXPRESSION` 组合。
+> CMake 中 `PASS_REGULAR_EXPRESSION` 一旦设置，就用“输出是否匹配正则”覆盖退出码判定
+> （匹配=通过，与退出码无关），`WILL_FAIL` 再对该结果取反，实际判据变成
+> “输出不含错误行才通过”——正确拒绝非法参数的服务端反而判 FAIL，无输出的崩溃却判 PASS。
+
+预期结果：3 个用例全部通过，输出形如：
+
+```
+Test project <...>/tcp_hello_demo/build
+    Start 1: tcp_hello_invalid_port_zero
+1/3 Test #1: tcp_hello_invalid_port_zero .......   Passed    0.03 sec
+2/3 Test #2: tcp_hello_invalid_port_overflow ...   Passed    0.03 sec
+3/3 Test #3: tcp_hello_invalid_port_text .......   Passed    0.03 sec
+
+100% tests passed, 0 tests failed out of 3
+```
+
+失败时包装脚本以 `FATAL_ERROR` 退出（ctest 判 `Failed` 并打印实际退出码与输出），
+`--output-on-failure` 会显示具体原因。包装脚本也可手工单独运行，便于定位：
+
+```powershell
+cd tcp_hello_demo\build
+cmake -DSERVER=Release/tcp_hello_server.exe -DARG=65536 -P check_invalid_port.cmake
+```
+
+同一契约也包含在全量验收脚本中：§6.1 的 `S5` 会用构建产物依次传入 `0`、`65536`、
+`not-a-port`，断言“非零退出 + 输出含错误行”，与 ctest 用例口径一致。
 
 ---
 
@@ -340,6 +383,7 @@ ctest -C Release --output-on-failure
 | 启动即输出 `ERROR bind failed: port in use (WSA 10048)` 并退出 1 | 端口被占用。用 `netstat -ano \| findstr :9000` 找到占用进程，或换端口运行（如 `tcp_hello_server.exe 9100`） |
 | 启动即输出其他 `ERROR ... (WSA <code>)` 并退出 1/3 | 按日志中的 Winsock 错误码定位；退出码 3 表示 `WSAStartup` 失败 |
 | 测试脚本 S6/S7 失败且提示端口仍被占用 | 上一次测试残留进程或端口未释放；先结束占用进程，再重跑全量 S1–S7 |
+| `ctest` 报找不到 `check_invalid_port.cmake` | 该包装脚本由 `CMakeLists.txt` 在配置阶段生成到构建目录；构建目录是旧配置时重新执行 `cmake -S . -B build` 即可生成 |
 | 客户端收不到数据 | 确认连接的是回环 `127.0.0.1` 与服务端实际端口，且服务端已输出 `LISTENING port=<port>` |
 
 ---

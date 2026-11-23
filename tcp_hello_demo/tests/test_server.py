@@ -16,7 +16,7 @@
     S2 -> AC-2 周期发送
     S3 -> AC-3 双客户端并发
     S4 -> AC-4 断开隔离
-    S5 -> AC-5 构建与运行
+    S5 -> AC-5 构建与运行（含非法端口参数校验，与 ctest 负面用例同一判据）
     S6 -> AC-6 优雅退出
     S7 -> AC-7 端口占用
 
@@ -66,6 +66,12 @@ EXIT_TIMEOUT_S = 10.0             # S7 等待服务端自行退出的上限
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200  # 子进程组 ID 等于其 PID
 CTRL_BREAK_EVENT = 1
+
+# 非法端口参数契约（与 CMakeLists.txt 的 ctest 负面用例、README §6.3 保持同一判据）
+INVALID_PORT_ARGUMENTS = ("0", "65536", "not-a-port")
+INVALID_PORT_EXIT_CODE = 2                              # 本实现约定，见 README §8
+INVALID_PORT_ERROR = "ERROR invalid port argument"      # README §7 日志契约
+CLI_TIMEOUT_S = 30.0              # 单个命令行用例的退出等待上限
 
 # ---------------------------------------------------------------------------
 # Windows 控制台控制事件
@@ -510,6 +516,43 @@ def _validate_stream(result: Result, label: str, messages, connected_at: float, 
                      f"超出 [{INTERVAL_MIN_S:.1f}s, {INTERVAL_MAX_S:.1f}s]")
 
 
+def check_invalid_port_arguments(server: Path, result: Result) -> None:
+    """校验非法端口参数契约：非零退出且输出含 README §7 约定的错误行。
+
+    与 CMakeLists.txt 的 ctest 负面用例使用同一判据——两项必须同时成立：
+    只看退出码时，进程崩溃或运行库缺失导致的任意非零退出都会被误判为通过；
+    只看输出时，退出码契约不再被校验。两者都满足才算参数校验路径工作正常。
+    """
+    creationflags = CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    for argument in INVALID_PORT_ARGUMENTS:
+        try:
+            completed = subprocess.run(
+                [str(server), argument],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=CLI_TIMEOUT_S,
+                creationflags=creationflags,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ScenarioFailure(
+                f"非法端口参数 {argument!r}：服务端 {CLI_TIMEOUT_S:.0f} 秒内未退出（挂起）") from exc
+        except OSError as exc:
+            raise ScenarioFailure(f"非法端口参数 {argument!r}：无法启动服务端（{exc}）") from exc
+
+        output = (completed.stdout or "") + (completed.stderr or "")
+        result.check(completed.returncode != 0,
+                     f"非法端口参数 {argument!r}：退出码 {completed.returncode}，"
+                     f"期望非零（本实现约定 {INVALID_PORT_EXIT_CODE}）")
+        result.check(INVALID_PORT_ERROR in output,
+                     f"非法端口参数 {argument!r}：输出缺少 {INVALID_PORT_ERROR!r}；"
+                     f"实际输出：{output[-200:]!r}")
+        result.note(f"非法端口参数 {argument!r} 被拒绝：退出码 {completed.returncode}，"
+                    f"输出含 {INVALID_PORT_ERROR!r}")
+
+
 # ---------------------------------------------------------------------------
 # 场景实现
 # ---------------------------------------------------------------------------
@@ -692,12 +735,16 @@ def _observe_no_data(client: socket.socket, until: float):
 
 
 def scenario_s5(ctx, result: Result) -> None:
-    """S5/AC-5：CMake 配置与构建成功无错误，构建产物运行后输出监听端口。"""
+    """S5/AC-5：CMake 配置与构建成功无错误，构建产物运行后输出监听端口；
+    非法端口参数以非零退出并输出错误行（与 §6.3 的 ctest 负面用例同一判据）。"""
     outcome = ensure_build(ctx)
     for message in outcome.messages:
         result.note(message)
     result.check(outcome.server_path is not None, "构建后未定位到服务端可执行文件")
     result.note(f"构建产物：{outcome.server_path}")
+
+    # 命令行参数校验不触碰网络端口，先于监听场景执行，失败可立即定位到参数解析路径。
+    check_invalid_port_arguments(outcome.server_path, result)
 
     port = ctx.port
     if not wait_port_free(port, 5.0):
